@@ -8,7 +8,7 @@ from threading import Thread
 from dataclasses import dataclass, field
 from typing import List
 
-# --- DATA MODELS & STATE MANAGEMENT ---
+# --- DATA MODELS ---
 @dataclass
 class MissionLogEntry:
     timestamp: str
@@ -22,103 +22,105 @@ class MissionState:
     coords: List[int] = field(default_factory=lambda: [500, 500])
     history: List[dict] = field(default_factory=list)
     event_logs: List[MissionLogEntry] = field(default_factory=list)
+    network_active: bool = True 
 
-# Initialize Session State for Streamlit Persistence
+# --- 1. INITIALIZE STATE IMMEDIATELY ---
 if 'state' not in st.session_state:
     st.session_state.state = MissionState()
 
-# --- BACKGROUND MISSION LOGIC (SENSORS & MANAGER) ---
-def run_uav_logic():
-    """Simulates the backend flight and target acquisition logic."""
+# --- 2. THE THREAD-SAFE LOGIC ---
+def run_uav_logic(state_ref):
     angle = 0
     while True:
-        # Check if user 'cut' the network link via UI
-        if not st.session_state.get('network_active', True):
+        # Check the reference directly for thread safety
+        if not state_ref.network_active:
             time.sleep(1)
             continue
             
-        # 1. Sensor: Calculate Circular Flight Path
+        # Sensor Simulation
         x = int(500 + 200 * math.cos(angle))
         y = int(500 + 200 * math.sin(angle))
         
-        # 2. AI: Simulated Target Acquisition (92% threshold)
-        detection_chance = random.random()
-        target_found = detection_chance > 0.92
-        
-        # 3. Manager: Update Status and Log Events (Traceability)
+        # AI Detection Simulation
+        target_found = random.random() > 0.94
         new_status = "TRACKING" if target_found else "SEARCHING"
         
-        if target_found and not st.session_state.state.target_acquired:
-            # New target event
+        # Logic: Log unique target events
+        if target_found and not state_ref.target_acquired:
             log = MissionLogEntry(
                 timestamp=datetime.now().strftime("%H:%M:%S"),
                 event="TARGET_ACQUIRED",
                 coordinates=f"[{x}, {y}]"
             )
-            st.session_state.state.event_logs.insert(0, log)
-            if len(st.session_state.state.event_logs) > 10: st.session_state.state.event_logs.pop()
+            state_ref.event_logs.insert(0, log)
+            if len(state_ref.event_logs) > 10: state_ref.event_logs.pop()
 
-        st.session_state.state.status = new_status
-        st.session_state.state.target_acquired = target_found
-        st.session_state.state.coords = [x, y]
+        # Update State
+        state_ref.status = new_status
+        state_ref.target_acquired = target_found
+        state_ref.coords = [x, y]
+        state_ref.history.append({"x": x, "y": y})
         
-        # Update Visual History
-        st.session_state.state.history.append({"x": x, "y": y})
-        if len(st.session_state.state.history) > 40: st.session_state.state.history.pop(0)
+        if len(state_ref.history) > 40: 
+            state_ref.history.pop(0)
             
         angle += 0.12
         time.sleep(0.4)
 
-# Start logic thread once
+# --- 3. START THREAD ---
 if 'logic_thread' not in st.session_state:
-    thread = Thread(target=run_uav_logic, daemon=True)
+    # Pass the actual state object to the thread so it bypasses st.session_state proxy
+    thread = Thread(target=run_uav_logic, args=(st.session_state.state,), daemon=True)
     thread.start()
     st.session_state.logic_thread = True
 
-# --- HUMAN-SYSTEM INTERFACE (UI) ---
+# --- 4. HUMAN-SYSTEM INTERFACE (UI) ---
 st.set_page_config(page_title="UAV Digital Twin", layout="wide")
 
-st.title("🛰️ UAV Mission Digital Twin")
+st.title("UAV Mission Digital Twin")
 st.markdown("**Architectural Model:** MOSA/JADC2 Simulation")
 
-# Sidebar - Human Intervention
-st.sidebar.header("Command & Control")
-st.session_state.network_active = st.sidebar.toggle("UAV Data Link", value=True)
-st.sidebar.divider()
-st.sidebar.info("This dashboard simulates a Modular Open Systems Approach where the 'Brain' (Logic) is decoupled from the 'Interface' (Streamlit).")
+# Create a local reference for cleaner UI code
+state = st.session_state.state
 
-# Telemetry Metrics
+# Sidebar
+st.sidebar.header("Command & Control")
+state.network_active = st.sidebar.toggle("UAV Data Link", value=True)
+st.sidebar.divider()
+st.sidebar.info("Simulating a decoupled architecture where backend logic remains independent of the display layer.")
+
+# Telemetry Metrics (Specify 3 columns)
 m1, m2, m3 = st.columns(3)
-if st.session_state.network_active:
-    m1.metric("Mode", st.session_state.state.status)
+
+if state.network_active:
+    m1.metric("Mode", state.status)
     m2.metric("Link Latency", f"{random.randint(15, 55)}ms")
-    m3.metric("Vector", f"{st.session_state.state.coords}")
+    m3.metric("Vector", f"{state.coords}")
 else:
     m1.error("LINK LOST")
     m2.metric("Link Latency", "--")
     m3.warning("GPS STALE")
 
-# Tactical Visualization & Logs
-col_left, col_right = st.columns([2, 1])
+# Tactical Visualization & Logs (Specify 2 columns)
+col_left, col_right = st.columns(2)
 
 with col_left:
     st.subheader("Tactical Plot")
-    if st.session_state.network_active:
-        df = pd.DataFrame(st.session_state.state.history)
-        if not df.empty:
-            st.scatter_chart(df, x="x", y="y", size=30)
+    if state.network_active and len(state.history) > 0:
+        df = pd.DataFrame(state.history)
+        st.scatter_chart(df, x="x", y="y", size=30)
     else:
-        st.info("Awaiting telemetry sync...")
+        st.info("Awaiting telemetry synchronization...")
 
 with col_right:
     st.subheader("Mission Traceability Log")
-    if st.session_state.state.event_logs:
-        log_df = pd.DataFrame([vars(l) for l in st.session_state.state.event_logs])
+    if len(state.event_logs) > 0:
+        log_df = pd.DataFrame([vars(l) for l in state.event_logs])
         st.table(log_df)
     else:
-        st.write("No combat events recorded.")
+        st.write("No mission events recorded in current thread.")
 
-# Forced UI Refresh
+# Auto-Refresh
 time.sleep(0.5)
 
 st.rerun()
